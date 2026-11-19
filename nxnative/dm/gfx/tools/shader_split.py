@@ -1261,6 +1261,16 @@ def zs_dicts(romfs):
     d = zstd_mod().decompress(open(p, 'rb').read())
     return {struct.unpack_from('<I', m, 4)[0]: m for _, m in sarc_members(d) if m[:4] == bytes.fromhex('37a430ec')}
 
+import mmap
+class FileMap(mmap.mmap):   # a read-only map that answers `b'..' in d` like bytes do (mmap's own `in` compares single bytes and is always False for a bytes needle)
+    def __contains__(self, x): return self.find(x) != -1
+BIG_FILE = 256 << 20   # from this size a loose file is mapped, not read: Digimon Story: Time Stranger's app_0.nx64.mvgl (6.2 GB) read whole outgrew a 7 GB phone and Android killed the split; mapped pages are file-backed, so the kernel drops them under pressure
+def read_file(path):
+    """The bytes of a loose file for the scanners: read whole when small, else a read-only FileMap (slicing, struct.unpack_from, re, find and `in` work as on bytes)"""
+    if os.path.getsize(path) < BIG_FILE:
+        with open(path, 'rb') as f: return f.read()
+    with open(path, 'rb') as f: return FileMap(f.fileno(), 0, access=mmap.ACCESS_READ)
+
 def unzs(path):
     """A zstd file decompressed: frames without a dictionary as they are, frames that name one with that dictionary from ZDICTS. The zstd module, not the zstd command: Windows has no
     such command (Mario vs. Donkey Kong's .zs shaders stopped the split there), and the porter already requires the module"""
@@ -1401,6 +1411,47 @@ def scan_blob(d, label, out):
         if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc': out.extend(bnsh_shaders(d, m.start(), label))
     if MGFX in d: out.extend(mgfx_shaders(d, label))
     if b'SLCT' in d: out.extend(slct_loose(d, label))   # Monolith SLCTs outside an HCPS (Xenoblade Chronicles 3's main)
+
+def mvgl_shadshaders(path, label):
+    """Media.Vision's MDB1 archive of Digimon Story: Time Stranger (.mvgl, the shaders of the whole game in app_0.nx64.mvgl and its patches). Header '<4sIIIQQ' (magic, tree entries, name entries, data
+    entries, data start, archive size), then 16-byte tree entries (u32 x4, the second is the descriptor index), 128-byte NUL-terminated names ('shadshaders\\<material>_vp' / '_fp'), 16-byte descriptors
+    (u64 offset from the data start, u32 length, u32 stored length; stored < length: an LZ4 block). A shader record is 'NXVS' (vertex) / 'NXFS' (pixel), control offset / size and code offset / size
+    at +0x0c (u32 each), the control section at +0x40. Pairs by material name (var_pairs). → [(where, stage, control, code)], or None when the file is not this layout (Cyber Sleuth's MDB1 is another,
+    mvgl.py). The archive is mapped, never read whole (app_0.nx64.mvgl is 6.2 GB)"""
+    import lz4.block, mmap
+    with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+        if len(d) < 32 or d[:4] != b'MDB1': return None
+        _, nt, nn, nd, data_start, total_size = struct.unpack_from('<4sIIIQQ', d, 0)
+        tree_base = 32; name_base = tree_base + nt * 16; desc_base = name_base + nn * 128
+        if desc_base + nd * 16 != data_start or total_size != len(d): return None
+        found, skipped = [], 0
+        for i in range(min(nt, nn)):
+            name_raw = bytes(d[name_base + i * 128:name_base + (i + 1) * 128]).split(b'\0', 1)[0]
+            if b'shadshaders\\' not in name_raw.lower().replace(b'/', b'\\'): continue
+            did = struct.unpack_from('<I', d, tree_base + i * 16 + 4)[0]
+            if did == 0xffffffff or did >= nd: red(f'{label}: shadshaders entry {i} has invalid descriptor {did:#x}')
+            off, logical, stored = struct.unpack_from('<QII', d, desc_base + did * 16)
+            start = data_start + off
+            if stored > logical or start > len(d) or stored > len(d) - start: red(f'{label}: {name_raw!r}: descriptor payload is outside archive')
+            packed = bytes(d[start:start + stored])
+            try: blob = lz4.block.decompress(packed, uncompressed_size=logical) if stored < logical else packed
+            except Exception as e: red(f'{label}: {name_raw!r}: LZ4 decompression failed: {e}')
+            if len(blob) != logical: red(f'{label}: {name_raw!r}: decoded size mismatch')
+            if len(blob) < 0x1c or blob[:4] not in (b'NXVS', b'NXFS'): red(f'{label}: {name_raw!r}: invalid NXVS/NXFS record')
+            co, cn, ko, kn = struct.unpack_from('<4I', blob, 0x0c)
+            if co != 0x40 or cn < 0x24 or kn < 0x34: red(f'{label}: {name_raw!r}: invalid wrapper regions')
+            if co > len(blob) or cn > len(blob) - co or ko > len(blob) or kn > len(blob) - ko: red(f'{label}: {name_raw!r}: wrapper region outside record')
+            ctl, code = blob[co:co + cn], blob[ko:ko + kn]
+            if '.ounce64.' in label and code[:4] != GFX_MAGIC: skipped += 1; continue   # Switch 2 code (another GPU generation, no NVN Maxwell code area); the Switch 1 build loads the nx64 archives
+            st = 'vs' if blob[:4] == b'NXVS' else 'ps'
+            if sph_stage(code) != st: red(f'{label}: {name_raw!r}: wrapper stage {st}, code stage {sph_stage(code)}')
+            why = check(label, st, ctl, code)
+            if why: red(f'{label}: {name_raw!r}: {why}')
+            suffix = b'_vp' if st == 'vs' else b'_fp'
+            if not name_raw.lower().endswith(suffix): red(f'{label}: {name_raw!r}: missing {suffix.decode()} suffix')
+            found.append((f"{label}#MVGL#{name_raw[:-3].decode('utf-8', 'replace')}#var", st, ctl, code))
+        if skipped: print(f'[RED] {label}: {skipped} Switch 2 (ounce64) shader records are not NVN Maxwell code and are left out: the Switch 1 build loads the nx64 archives', flush=True)
+        return found
 
 def group(label):
     """source group (second half of the package file name)"""
@@ -1654,6 +1705,11 @@ def scan_file(args):
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if ext == '.mvgl' and head[:4] == b'MDB1' and len(args) == 2:   # Digimon Story: Time Stranger's shaders (mvgl_shadshaders); None = Cyber Sleuth's layout, scanned as a loose file
+        mv = mvgl_shadshaders(path, '/' + rel)
+        if mv is not None:
+            found += mv
+            return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -1680,7 +1736,7 @@ def scan_file(args):
     if head[:8] == GFPAK:   # a Game Freak archive (gfpak_members): each entry scanned as a file of its own (the shaders are BNSH entries)
         for nm, m in gfpak_members(open(path, 'rb').read(), '/' + rel): scan_blob(m, f'/{rel}{nm}', found)
         return rel, uniq_keys(found), var_pairs(found), trees
-    d = unzs(path) if head[:4] == ZSTD_MAGIC else open(path, 'rb').read()   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
+    d = unzs(path) if head[:4] == ZSTD_MAGIC else read_file(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib, before the shader prefilter
     if head[:4] != ZSTD_MAGIC and head[4:8] in (ZSTD_MAGIC, LZ4_FRAME_MAGIC): d = unsized(d, '/' + rel)   # a size-prefixed frame (unsized): Kirby and the Forgotten Land keeps its BNSH in 7,201 .cmp files; read raw, the split found 121 of its 27,297 shaders
     if d[:4] == b'Yaz0': d = yaz0(d)
@@ -1813,7 +1869,7 @@ def main():
                                             ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)),
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)), ('Monolith SLCT', any('#HCPS@' in r[4] or '#SLCT@' in r[4] for r in rows)),
-                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
+                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows)), ('MVGL NXVS / NXFS', any('#MVGL#' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; this game has no PC version to pair with\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
