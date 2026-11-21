@@ -1077,7 +1077,8 @@ static void vk_pools_sync_(VkCommandBuffer cb) {
 struct vksub; static void pools_copy_back(const struct vksub *s);
 
 // ---------------- submission slots ----------------
-#define NSLOT 6
+#define NSLOT 32   // the most slots the ring can have; it runs DM_VK_NSLOT of them (start-up, 2 to NSLOT, default 6: g_nslot)
+static int g_nslot = 6;
 #define MAIN_CBS 32   // (allocated as used: DM_VK_PASS_SPLIT cuts inside passes as well)
 // GPU time: a timestamp at the start and end of each submission's main command buffer (one queue: their sum is the time the GPU was busy)
 static VkQueryPool g_tsq; uint64_t g_gpu_ns;
@@ -1199,7 +1200,7 @@ void vk_pass_report(void) {   // the most expensive passes since the last report
 static pthread_mutex_t g_sub_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_fence;   // fence of the last commit
 static VkSemaphore g_timeline;   // submission f signals the value f (V.has_timeline), else g_fring[f % NFRING]
-#define NFRING 16   // more than the submissions in flight (NSLOT: mtl_sub_begin's slot_recycle waits for the slot's last one)
+#define NFRING (NSLOT + 8)   // more than the submissions in flight (NSLOT: mtl_sub_begin's slot_recycle waits for the slot's last one)
 static VkFence g_fring[NFRING];
 static pthread_mutex_t g_done_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_done;
@@ -1213,7 +1214,8 @@ static void slots_init(void) {
     VkQueryPoolCreateInfo cqi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, NSLOT * CQ};
     if (!g_tsq || vkCreateQueryPool(V.dev, &cqi, NULL, &g_cq)) g_cq = VK_NULL_HANDLE;
     { const char *e = getenv("DM_VK_PASS_TIMES"); if (e && atoi(e)) { VkQueryPoolCreateInfo pq = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, NSLOT * PASSQ * 2}; if (vkCreateQueryPool(V.dev, &pq, NULL, &g_pq)) g_pq = VK_NULL_HANDLE; } }
-    for (int i = 0; i < NSLOT; i++) {
+    { const char *e = getenv("DM_VK_NSLOT"); int n = e ? atoi(e) : 0; if (n >= 2 && n <= NSLOT) g_nslot = n; }
+    for (int i = 0; i < g_nslot; i++) {
         // not TRANSIENT, and reset by command buffer (see slot_recycle)
         VkCommandPoolCreateInfo ci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, V.qf};
         VKCHK(vkCreateCommandPool(V.dev, &ci, NULL, &g_slot[i].pool));
@@ -1236,9 +1238,12 @@ static void wait_fence(uint64_t f) {
 // replay ~3,000 draws a frame on a thread that is the frame's limit). The slot is then taken only after the completion thread has passed it (mtl_wait, g_done)
 // rather than as soon as the GPU has. DM_VK_X_NOPRERESET=1 (start-up): reset as they are begun
 static int g_prereset = -1;
+uint64_t g_ns_slotwait;   // the replay waiting here for the slot's last submission to finish on the GPU (gfx_vk_present.c prints it per frame)
 static void slot_recycle(vksub_t *s) {   // the GPU has passed this slot's last submission: free what it held, rewind its allocators
     if (g_prereset < 0) { const char *e = getenv("DM_VK_X_NOPRERESET"); g_prereset = !(e && atoi(e)); }
+    struct timespec w0, w1; clock_gettime(CLOCK_MONOTONIC, &w0);
     if (g_prereset) mtl_wait(s->fence, ~0ull); else wait_fence(s->fence);
+    clock_gettime(CLOCK_MONOTONIC, &w1); g_ns_slotwait += (uint64_t)(w1.tv_sec - w0.tv_sec) * 1000000000ull + (uint64_t)(w1.tv_nsec - w0.tv_nsec);
     pthread_mutex_lock(&g_df_mu); dfree_t *df = s->df; int ndf = s->ndf; s->df = NULL; s->ndf = s->capdf = 0; pthread_mutex_unlock(&g_df_mu);   // the list taken whole: a game thread may add to it meanwhile
     for (int i = 0; i < ndf; i++) {
         dfree_t *d = &df[i];
@@ -1432,7 +1437,7 @@ static void begin_segment(int continuing) {
     pthread_mutex_lock(&g_sub_lock);
     // the next slot of the ring (g_cur is -1 between submissions, so it cannot say where the ring is: every submission took slot 0 and waited in slot_recycle
     // for the one before to finish on the GPU, which kept the replay of a frame from overlapping the GPU work of the last)
-    static int next; g_cur = next; next = (next + 1) % NSLOT; vksub_t *s = &g_slot[g_cur];
+    static int next; g_cur = next; next = (next + 1) % g_nslot; vksub_t *s = &g_slot[g_cur];
     slot_recycle(s);
     s->npost = 0; s->up_used = 0; s->ngw = 0;
     { const char *e = getenv("DM_VK_POOL_READBACK_RANGES"); s->readback_ranges = e && atoi(e); }
