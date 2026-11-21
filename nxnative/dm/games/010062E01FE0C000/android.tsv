@@ -1,7 +1,8 @@
 # Digimon Story: Time Stranger on Android (Unreal Engine 4 on SDK 20.5.21, update 1.2.2; the shaders sit in MVGL archives, read by shader_split.py)
-# Brought up from an experimental port on the Poco F5: reaches gameplay, about 20-21 fps in a crowded area; assets still lack shaders the app captures on the device.
+# Brought up from an experimental port on the Poco F5: about 30 fps in a crowded area with a Turnip driver (--vulkan-driver, StevenMXZ Gen8 v39 patched, 26.99.99)
+# and DM_GPU_TURBO=1, neither of which this profile sets; 20-21 fps with the system driver. Known: a brief stutter and a blue line artifact while an area loads.
 status	wip
-tested	v262144 Poco F5 (Snapdragon 7+ Gen 2, Adreno 725, driver 512.863.1)
+tested	v262144 Poco F5 (Snapdragon 7+ Gen 2, Adreno 725, Turnip 26.99.99)
 package	org.nx2a.t010062e01fe0c000
 orientation	landscape
 env	DM_NVN_ASYNC=1
@@ -10,3 +11,5 @@ env	DM_NVN_ACQ_REPLAYED=0
 env	DM_VK_PASS_SPLIT=128
 env	DM_VK_CB_DRAWS=128
 env	DM_VK_PASS_SPLIT_DEPTH=1
+env	DM_PIN_REPLAY=prime
+env	DM_VK_NSLOT=32
