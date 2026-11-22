@@ -39,6 +39,12 @@ python -m porter doctor
 python -m porter port "D:\Games\NEO" -k "D:\keys\prod.keys" --install
 ```
 
+Add `--jobs=1` to rewrite the game's modules one at a time. A positive `--jobs N`
+also controls the parallel shader and host build work; the default is the CPU
+count (eight if unavailable). Serial rewriting reduces concurrent work but does
+not cap a single module's memory use. Changing `--jobs` preserves reusable
+rewrite outputs, so a completed rewrite need not run again for a different limit.
+
 The APK (`NeoTheWorldEndsWithYou.apk`) and the data pack (`NeoTheWorldEndsWithYou-data/`) appear in the game folder (`-o` picks another). `python -m porter install <App>-data` installs a port made earlier; with `--romfs-at <folder on the device>` the app reads the game's RomFS from a folder already there (an emulator's dump of the same version) instead of a copy in its files folder ([ARCHITECTURE.md](ARCHITECTURE.md#the-port), A RomFS already on the device). The first port takes a while (extraction, rewriting the game's code, translating its shaders); later ones reuse what has not changed. `python -m porter -h` lists the commands.
 
 ### Saves
@@ -86,7 +92,7 @@ It refuses when the game's code on the device was rewritten with other rewriter 
 
 ## Adding a game
 
-Each game is a profile in `nxnative/dm/games/<title ID>/` with an `android.tsv`: [ARCHITECTURE.md](ARCHITECTURE.md#adding-a-game). A finished port updates, in the profile's commit, the games table in the [README](../README.md#games) (its row, with a gameplay frame captured on the device in `docs/images/` and the tag of the nx2android version it was tested on) and [PORT_CHECKLIST.md](PORT_CHECKLIST.md).
+Each game is a profile in `nxnative/dm/games/<title ID>/` with an `android.tsv`: [ARCHITECTURE.md](ARCHITECTURE.md#adding-a-game). A finished port adds, in the profile's commit, the game's own page `nxnative/dm/games/<title ID>/README.md` ([GAME_README_TEMPLATE.md](GAME_README_TEMPLATE.md): game version, frame rate, tested devices, options, quirks), its place in the [README](../README.md#games)'s games list (the profile's `readme_image` and `readme_tag` rows: a gameplay frame captured on the device in `docs/images/` and the tag of the nx2android version it was tested on) and [PORT_CHECKLIST.md](PORT_CHECKLIST.md); `python docs/gen_tables.py` writes the list, the page's facts block, the checklist's ticks and its count from the profiles (and starts the page from the template), so pull requests do not edit the same lines. The porter's options: a field of `porter/pipeline.py` `Options` and a `porter port` argument of the same name (`Options.from_args`).
 
 ## Releases and version numbers
 
@@ -123,16 +129,22 @@ axis preservation, not game recognition or device behavior.
 
 ## Tests
 
+```
+python -m unittest discover tests
+```
+
+**Every push and pull request** runs them on GitHub (`.github/workflows/tests.yml`): Linux with gcc and with clang, macOS, and Windows with MinGW gcc, plus an NDK compile of the Android host (debug and release). A Windows PC without a POSIX C compiler skips about 150 C harness tests, so a red Tests run is the first place such a break shows: wait for it before you merge into main. The release workflows run the tests again before they build the bundles.
+
+**Shader translator changes**: the CI runs the synthetic shader tests (`tests/test_spirv_per_vertex.py`); game shaders are game data and stay on your PC. `python devtools/shader_corpus.py record` (on main) and `check` (on the change) translate the split shaders of every port in `.gamedump` with the checkout's translator and list, game by game, the shaders whose SPIR-V the change touches (`--sample N` for a quick look: 300 shaders take seconds). The translator's key ignores comments and whitespace (`porter/codekey.py`), so a comment-only change keeps every game's shader bundle.
+
+**C harnesses** compile code cut out of core sources with their own stubs. Cut with `tests/csrc.py` (`csrc.function(src, 'static void f(')` takes a whole function; `csrc.between(src, begin, end)`), which names the source and the marker when the code moved. A cut function that calls a new symbol needs a stub in that harness: the Tests run on the pull request shows which.
+
 `test_nvn_sampler_cache` exercises the production sampler initializer, finalizer,
 comparison and object layout. It checks that all four formerly skipped filter/wrap
 fields participate in an opaque-object CRC, preserves guard bytes beyond the
 smallest public object, and models hash lookup followed by semantic comparison:
 10,000 alternating requests must retain two entries. The cache model is separate
 from gameplay validation.
-
-```
-python -m unittest discover tests
-```
 
 `test_vk_pixel_history` exercises production ROI/HDR helpers and mocked Vulkan
 capture/fence/resource behavior. Its harness also runs natively on Android.

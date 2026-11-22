@@ -4,7 +4,7 @@
 - **Start-up switches:** put them in the app's `env.txt` (`/sdcard/Android/data/<package>/files/env.txt`, one `KEY=VALUE` per line), then restart the app.
 - **Live switches:** append `env KEY=VALUE` to `ctl.txt` while the game runs. These are re-read at each submission or present. `ctl.txt` needs a development build with `DM_CTL=<files>/ctl.txt` in `env.txt`; release builds ignore it.
 
-The source of each switch is in `nxnative/dm/android/` unless noted. Check the code comment there before relying on a description below: switches are added and retired as bugs are found.
+Every switch has a row in `nxnative/dm/settings.tsv` (type, default, scope, doc; docs/ARCHITECTURE.md, Settings): a new switch needs a row there, and a name with no row is logged as `[RED] setting ... is not in nxnative/dm/settings.tsv`. The source of each switch is in `nxnative/dm/android/` unless noted. Check the code comment there before relying on a description below: switches are added and retired as bugs are found.
 
 ## Diagnostics
 
@@ -133,6 +133,7 @@ The source of each switch is in `nxnative/dm/android/` unless noted. Check the c
 | `DM_ADAPTIVE_FPS=0` | start-up | keep the game's own period |
 | `DM_VK_PACE=0` | live (every 30 presents, `gfx_vk_present.c` `pace_desired`) | present without desired times (`VK_GOOGLE_display_timing`): frames go out at the first vsync after they are latched, as before. On, each frame is timed at the last one's plus the game's period on the display's vsync grid; the log's `[perf] display timing` line counts resyncs (a longer frame where the cadence restarted later) and frames shown a vsync or more after their time. Measure on screen with `dumpsys SurfaceFlinger --latency "<the app's NativeActivity#N layer>"` (column 2 = actual present) |
 | `DM_MOVIE_AUDIO_SLOTS=N` | first audio decoder (`host/hle_movie.c`) | profile env: fewer output slots for the movie library's audio decoders than 64 (4..63), for a player that keeps the outputs it acquires in a fixed ring (Mario vs. Donkey Kong's ring holds 32) |
+| `DM_MOVIE_FAST=1` | first use (`android/movie_avc.c` `nv12_rgba`, `gfx/nvn/hle_nvn.c` `write_region_bl`, `gfx/tex/nvn_deswizzle.c` `move`) | profile env: NEON NV12 -> RGBA conversion (bit-exact) and block-linear copies one address per row and whole GOBs (the same addresses). MMBN Legacy Collection Vol. 1's launcher converts and uploads a 1080p movie frame every frame: on an Odin 2 in Standard mode (mid cores at 1.65 GHz) 30 -> 60 fps, conversion 9.9 -> 3.3 ms, WriteTexels 5.0 -> 2.5 ms |
 | `DM_NO_ADPF=1` | start-up | no Android performance hints |
 | `DM_OPMODE=0/1` | start-up (`host/hle_oe.c`) | handheld / docked at launch. The pause menu's Mode setting (`docked=` in `settings.txt`) overrides it and switches live |
 | `DM_AUDIO=0` | start-up (`host/hle_audio.c`) | silent sink (Android defaults to real output) |

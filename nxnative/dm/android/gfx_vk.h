@@ -1,6 +1,7 @@
 // Android port: the Vulkan backend behind the replay interface of nvn_mtl.h (what nvn_mtl.m implements on Metal).
 // Files: gfx_vk_core.c (device, memory pools, submissions, completion), gfx_vk_tex.c (formats, textures, samplers, registration tables),
-// gfx_vk_shader.c (shader bundle, modules, layouts), gfx_vk_exec.c (command replay: passes, pipelines, descriptors, draws, copies), gfx_vk_present.c (window, swapchain).
+// gfx_vk_shader.c (shader bundle, modules, layouts), gfx_vk_exec.c (command replay: passes, pipelines, descriptors, draws, copies; one file a section, gfx_vk_exec_<section>.inc), gfx_vk_present.c (window, swapchain),
+// gfx_vk_quirks.c (the GPU driver and its quirk table).
 // Version 1 is correct-first: whole-pipeline barriers between passes, full pipelines with a small dynamic state set, descriptor sets per draw.
 #pragma once
 #define VK_NO_PROTOTYPES
@@ -60,6 +61,7 @@ typedef struct {
     int tbuf_single_uniform, tbuf_single_storage;
 } vkdev_t;
 extern vkdev_t V;
+extern char g_vk_driver[32];   // the driver in use for the frame rate counter's driver row: "TURNIP 27.0.0", "QCOM 512.676.53" (set at init, gfx_vk_core.c)
 const void *vk_sg_pin(VkShaderStageFlagBits stage, const uint32_t *local);   // DM_VK_SUBGROUP_PIN: a game pipeline stage's pNext, NULL when the driver picks its size (local: a compute shader's workgroup size)
 // gfx_vk_subgroup.c (no Vulkan): the module as subgroups of one invocation when it uses a subgroup class not in ops (its stage's; 0 when the device has none there).
 // NULL when there is nothing the stage lacks (why empty) or it uses something not covered (why names it); the module then stays as it is
@@ -69,7 +71,7 @@ uint32_t vk_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryProperty
 void vk_init(void);   // once, from mtl_init or the first use
 
 // ---- memory pools (gfx_vk_core.c): the guest's pool memory is GPU memory (AHardwareBuffer mapped over it) ----
-typedef struct { uint64_t lo, hi; VkBuffer buf; VkDeviceMemory mem; void *ahb; int zero_copy, noncoherent; uint8_t *shadow, *baseline; uint64_t serial, base, end; int flags, synced, baseline_complete; uint64_t stamp, stamp0; const void *span; uint64_t boff; void *slab; uint32_t slot; int used, lazy; uint32_t lazy_n; uint64_t lazy_at, left; } vkpool_t;   // used: vk_pool_of has found it (DM_VK_MEMLOG); lazy: 1, no buffer until the GPU first uses it (pool_back), 2, that failed for good; lazy_n, lazy_at: failed tries, no try before (pool_ns); left: a length from lo that covers the pages a failed try left on a buffer it dropped (copied back when the pool is removed, unless a later try covered them); boff: [lo, hi) is at this offset of buf (a slab slot; 0 otherwise); serial: unique per pool made (caches of views over a pool's buffer key on it); [base, end): the game's pool, of which [lo, hi) is one chunk (ZC_CHUNK); flags: the NVN pool's (vk_pool_set_flags); baseline: last synchronized GPU-copy contents; baseline_complete: refreshed by a full completion merge, consumed by the next sync; synced, stamp, stamp0, span: a copied pool's incremental sync
+typedef struct { uint64_t lo, hi; VkBuffer buf; VkDeviceMemory mem; void *ahb; int zero_copy, noncoherent; uint8_t *shadow, *baseline; uint64_t serial, base, end; int flags, synced, baseline_complete; uint64_t stamp, stamp0; const void *span; uint64_t boff; void *slab; uint32_t slot; int used, lazy; uint32_t lazy_n; uint64_t lazy_at, left; int has_inner; } vkpool_t;   // used: vk_pool_of has found it (DM_VK_MEMLOG); lazy: 1, no buffer until the GPU first uses it (pool_back), 2, that failed for good; lazy_n, lazy_at: failed tries, no try before (pool_ns); left: a length from lo that covers the pages a failed try left on a buffer it dropped (copied back when the pool is removed, unless a later try covered them); has_inner: another (smaller) pool was made over memory inside it, so an address in it may be that pool's (sticky; pool_find answers it only from the locked search); boff: [lo, hi) is at this offset of buf (a slab slot; 0 otherwise); serial: unique per pool made (caches of views over a pool's buffer key on it); [base, end): the game's pool, of which [lo, hi) is one chunk (ZC_CHUNK); flags: the NVN pool's (vk_pool_set_flags); baseline: last synchronized GPU-copy contents; baseline_complete: refreshed by a full completion merge, consumed by the next sync; synced, stamp, stamp0, span: a copied pool's incremental sync
 vkpool_t *vk_pool_of(uint64_t addr, uint64_t len);   // the pool containing [addr, addr+len), NULL if none
 int vk_buf_at(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // GPU buffer + offset of a pool address range
 // Pools that could not be made zero-copy keep a GPU copy refreshed before each submission (vk_pools_sync, called from mtl_sub_begin)
@@ -200,3 +202,5 @@ enum { PT_DISPATCH = 0xd15 };   // vk_pass_ts: a dispatch timed as a pass (its f
 
 // Mark driver cache updates, including same-sized payload changes.
 void vk_pipeline_cache_changed(void);
+
+#include "gfx_vk_quirks.h"   // the GPU driver quirk table (vk_quirk)
